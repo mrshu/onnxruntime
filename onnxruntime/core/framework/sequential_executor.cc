@@ -68,10 +68,10 @@ static void CalculateTotalOutputSizes(OpKernelContextInternal* op_kernel_context
 #if defined(TRACE_EXECUTION)
       const TensorShape& tensor_shape = tensor.Shape();
       std::cout << node_name << " output[" << i << "]"
-                         << " size=" << tensor_size
-                         << " shape=" << tensor_shape.ToString()
-                         << " element_size=" << tensor.DataType()->Size()
-                         << "\n";
+                << " size=" << tensor_size
+                << " shape=" << tensor_shape.ToString()
+                << " element_size=" << tensor.DataType()->Size()
+                << "\n";
 #endif
       total_output_sizes += tensor_size;
     }
@@ -126,7 +126,11 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
                                    const std::vector<OrtValue>& feeds, const std::vector<int>& fetch_mlvalue_idxs,
                                    std::vector<OrtValue>& fetches,
                                    const std::unordered_map<size_t, CustomAllocator>& fetch_allocators,
-                                   const logging::Logger& logger) {
+                                   const logging::Logger& logger,
+                                   int64_t run_id) {
+
+  ORT_UNUSED_PARAMETER(feed_mlvalue_idxs);
+  ORT_UNUSED_PARAMETER(fetch_allocators);
   const bool is_profiler_enabled = session_state.Profiler().IsEnabled();
   TimePoint tp;
   TimePoint sync_time_begin;
@@ -139,12 +143,17 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
     tp = session_state.Profiler().StartTime();
   }
 
-  ExecutionFrame frame{feed_mlvalue_idxs, feeds, fetch_mlvalue_idxs, fetches, fetch_allocators, session_state};
   const std::unordered_set<NodeIndex>* to_be_executed_nodes = nullptr;
+  auto it = session_state.graph_runs_.find(run_id);
+
+  ORT_ENFORCE(it != session_state.graph_runs_.end());
+
+  ExecutionFrame& frame = *(it->second);
 
 #if !defined(ORT_MINIMAL_BUILD)
+
   to_be_executed_nodes = session_state.GetToBeExecutedNodes(fetch_mlvalue_idxs);
-  const bool only_execute_path_to_fetches = only_execute_path_to_fetches_ && (to_be_executed_nodes != nullptr);
+  const bool only_execute_path_to_fetches = only_execute_path_to_fetches_ && (to_be_executed_nodes != nullptr) && !frame.partial_graph_run_;
 
   if (only_execute_path_to_fetches) {
     VLOGS(logger, 1) << to_be_executed_nodes->size() << " nodes to be executed\n";
@@ -188,7 +197,8 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
       profile::Color::Black);
 #endif
 
-  for (const auto& node_exec_plan : exec_plan_vec) {
+  for (; frame.program_counter_ < exec_plan_vec.size(); frame.program_counter_ += 1) {
+    const auto& node_exec_plan = exec_plan_vec[frame.program_counter_];
     if (terminate_flag_) {
       LOGS(logger, WARNING) << "Exiting due to terminate flag being set to true.";
       return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Exiting due to terminate flag being set to true.");
@@ -424,6 +434,9 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
     // free ml-values corresponding to this node
     VLOGS(logger, 1) << "Releasing node ML values.";
     ORT_RETURN_IF_ERROR(ReleaseNodeMLValues(frame, seq_exec_plan, node_exec_plan, logger));
+    if (frame.partial_graph_run_ && p_op_kernel->KernelDef().OpName() == "YieldOp") {
+      break;
+    }
   }
 
 #ifdef ENABLE_NVTX_PROFILE
@@ -454,7 +467,7 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
   MemoryInfo::MemoryInfoProfile::Clear();
 #endif
 
-  if (frame.HasMemoryPatternPlanner()) {
+  if (frame.HasMemoryPatternPlanner() && !frame.partial_graph_run_) {
     std::vector<std::reference_wrapper<const TensorShape>> input_shapes;
     bool all_tensors = true;
     for (const auto& feed : feeds) {

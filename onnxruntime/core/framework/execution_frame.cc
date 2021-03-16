@@ -25,7 +25,7 @@ namespace onnxruntime {
 
 IExecutionFrame::IExecutionFrame(const OrtValueNameIdxMap& ort_value_idx_map,
                                  const NodeIndexInfo& node_index_info,
-                                 const std::vector<int>& fetch_mlvalue_idxs)
+                                 std::vector<int>& fetch_mlvalue_idxs)
     : node_index_info_(node_index_info),
       all_values_size_(static_cast<size_t>(ort_value_idx_map.MaxIdx()) + 1),
       fetch_mlvalue_idxs_(fetch_mlvalue_idxs) {
@@ -52,6 +52,7 @@ Status IExecutionFrame::SetOutputMLValue(int index, const OrtValue& ort_value) {
   }
 
   all_values_[ort_value_idx] = ort_value;
+  all_values_ort_ownership_[ort_value_idx] = true;
   return Status::OK();
 }
 
@@ -104,6 +105,12 @@ Status IExecutionFrame::ReleaseMLValueImpl(int ort_value_idx) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "invalid index ", ort_value_idx);
   }
 
+  // This tensor was created by ORT as an intermediate tensor but its ownership was transfered to the user or
+  // it was replaced by the user as an input tensor as part of partial graph execution, hence do not free this tensor.
+  if (!all_values_ort_ownership_[ort_value_idx]) {
+    return Status::OK();
+  }
+
   // If fence is available, check whether async read has completed or not.
   Fence_t fence = GetMLValue(ort_value_idx).Fence();
   if (fence && !fence->CanRelease()) {
@@ -129,6 +136,7 @@ void IExecutionFrame::Init(const std::vector<int>& feed_mlvalue_idxs, const std:
 
   // 1. resize the all_value_ vector
   all_values_.resize(all_values_size_);
+  all_values_ort_ownership_.resize(all_values_size_);
 
   // 2. Handle non-empty output vector
   if (!fetches.empty()) {
@@ -137,6 +145,7 @@ void IExecutionFrame::Init(const std::vector<int>& feed_mlvalue_idxs, const std:
     for (size_t idx = 0; idx < num_fetches; ++idx) {
       int ort_value_idx = fetch_mlvalue_idxs_[idx];
       all_values_[ort_value_idx] = fetches[idx];
+      all_values_ort_ownership_[ort_value_idx] = false;
     }
   }
 
@@ -178,6 +187,7 @@ void IExecutionFrame::Init(const std::vector<int>& feed_mlvalue_idxs, const std:
       ORT_THROW_IF_ERROR(CopyTensor(src, *dest.GetMutable<Tensor>()));
     } else {
       all_values_[ort_value_index] = entry.second;
+      all_values_ort_ownership_[ort_value_index] = true;
     }
   }
 
@@ -186,6 +196,31 @@ void IExecutionFrame::Init(const std::vector<int>& feed_mlvalue_idxs, const std:
     int ort_value_idx = feed_mlvalue_idxs[idx];
     // we are sharing the underline tensor/object for MLValue
     all_values_[ort_value_idx] = feeds[idx];
+    all_values_ort_ownership_[ort_value_idx] = false;
+  }
+}
+
+void IExecutionFrame::UpdateFeedAndFetches(const std::vector<int>& feed_mlvalue_idxs,
+                                           const std::vector<OrtValue>& feeds,
+                                           std::vector<int>& fetch_mlvalue_idxs,
+                                           const std::vector<OrtValue>& fetches) {
+  if (!fetches.empty()) {
+    fetch_mlvalue_idxs_ = fetch_mlvalue_idxs;
+
+    auto num_fetches = fetch_mlvalue_idxs_.size();
+
+    for (size_t idx = 0; idx < num_fetches; ++idx) {
+      int ort_value_idx = fetch_mlvalue_idxs_[idx];
+      all_values_[ort_value_idx] = fetches[idx];
+      all_values_ort_ownership_[ort_value_idx] = false;
+    }
+  }
+
+  for (size_t idx = 0, end = feed_mlvalue_idxs.size(); idx < end; ++idx) {
+    int ort_value_idx = feed_mlvalue_idxs[idx];
+    // we are sharing the underline tensor/object for MLValue
+    all_values_[ort_value_idx] = feeds[idx];
+    all_values_ort_ownership_[ort_value_idx] = false;
   }
 }
 
@@ -205,20 +240,23 @@ Status IExecutionFrame::GetOutputs(std::vector<OrtValue>& fetches) {
 
   for (size_t idx = 0; idx < num_fetches; ++idx) {
     fetches[idx] = GetMLValue(fetch_mlvalue_idxs_[idx]);
+    all_values_ort_ownership_[idx] = false;
   }
 
   return Status::OK();
 }
 
-bool IExecutionFrame::IsOutput(int ort_value_idx) const {
+bool IExecutionFrame::IsOutput(int ort_value_idx) {
   return std::find(fetch_mlvalue_idxs_.begin(), fetch_mlvalue_idxs_.end(), ort_value_idx) != fetch_mlvalue_idxs_.end();
 }
 
 ExecutionFrame::ExecutionFrame(const std::vector<int>& feed_mlvalue_idxs, const std::vector<OrtValue>& feeds,
                                const std::vector<int>& fetch_mlvalue_idxs, const std::vector<OrtValue>& fetches,
                                const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
-                               const SessionState& session_state)
-    : IExecutionFrame(session_state.GetOrtValueNameIdxMap(), session_state.GetNodeIndexInfo(), fetch_mlvalue_idxs),
+                               const SessionState& session_state, bool partial_graph_run)
+    : IExecutionFrame(session_state.GetOrtValueNameIdxMap(), session_state.GetNodeIndexInfo(), const_cast<std::vector<int>&>(fetch_mlvalue_idxs)),
+      partial_graph_run_(partial_graph_run),
+      program_counter_(0),
       session_state_(session_state),
       mem_patterns_(nullptr),
       planner_(nullptr) {

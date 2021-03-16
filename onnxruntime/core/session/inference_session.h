@@ -28,6 +28,7 @@
 #include "core/platform/tracing.h"
 #include <TraceLoggingActivity.h>
 #endif
+#include "core/framework/utils.h"
 
 namespace onnxruntime {  // forward declarations
 class GraphTransformer;
@@ -286,6 +287,13 @@ class InferenceSession {
   common::Status Run(const RunOptions& run_options, const NameMLValMap& feeds,
                      const std::vector<std::string>& output_names,
                      std::vector<OrtValue>* p_fetches) ORT_MUST_USE_RESULT;
+
+  common::Status RunCore(const RunOptions& run_options,
+                         const std::vector<std::string>& feed_names, const std::vector<OrtValue>& feeds,
+                         const std::vector<std::string>& output_names, std::vector<OrtValue>* p_fetches,
+                         const std::vector<OrtDevice>* p_fetches_device_info, bool partial_run = false, int64_t& run_id = utils::AVAL);
+
+  common::Status PartialRun(const RunOptions& run_options, IOBinding& io_binding, int64_t& run_id = utils::AVAL);
 
   /**
   * Creates a new binding object for binding inputs and outputs.

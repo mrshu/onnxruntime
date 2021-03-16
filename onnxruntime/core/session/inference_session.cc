@@ -1496,6 +1496,13 @@ Status InferenceSession::Run(const RunOptions& run_options,
                              const std::vector<std::string>& feed_names, const std::vector<OrtValue>& feeds,
                              const std::vector<std::string>& output_names, std::vector<OrtValue>* p_fetches,
                              const std::vector<OrtDevice>* p_fetches_device_info) {
+  return RunCore(run_options, feed_names, feeds, output_names, p_fetches, p_fetches_device_info);
+}
+
+Status InferenceSession::RunCore(const RunOptions& run_options,
+                                 const std::vector<std::string>& feed_names, const std::vector<OrtValue>& feeds,
+                                 const std::vector<std::string>& output_names, std::vector<OrtValue>* p_fetches,
+                                 const std::vector<OrtDevice>* p_fetches_device_info, bool partial_graph_run , int64_t& run_id) {
   TimePoint tp;
   if (session_profiler_.IsEnabled()) {
     tp = session_profiler_.StartTime();
@@ -1521,8 +1528,11 @@ Status InferenceSession::Run(const RunOptions& run_options,
     // log evaluation start to trace logging provider
     env.GetTelemetryProvider().LogEvaluationStart();
 
-    ORT_RETURN_IF_ERROR_SESSIONID_(ValidateInputs(feed_names, feeds));
-    ORT_RETURN_IF_ERROR_SESSIONID_(ValidateOutputs(output_names, p_fetches));
+    // REVIEW(codemzs): Need to populate intermediate tensors so they can be validated for partial run.
+    if (!partial_graph_run) {
+      ORT_RETURN_IF_ERROR_SESSIONID_(ValidateInputs(feed_names, feeds));
+      ORT_RETURN_IF_ERROR_SESSIONID_(ValidateOutputs(output_names, p_fetches));
+    }
 
     FeedsFetchesInfo info(feed_names, output_names, session_state_->GetOrtValueNameIdxMap());
     FeedsFetchesManager feeds_fetches_manager{std::move(info)};
@@ -1564,7 +1574,7 @@ Status InferenceSession::Run(const RunOptions& run_options,
     }
 
 #if !defined(ORT_MINIMAL_BUILD)
-    if (run_options.only_execute_path_to_fetches) {
+    if (!partial_graph_run && run_options.only_execute_path_to_fetches) {
       session_state_->UpdateToBeExecutedNodes(feeds_fetches_manager.GetFeedsFetchesInfo().fetches_mlvalue_idxs);
     }
 #endif
@@ -1572,7 +1582,7 @@ Status InferenceSession::Run(const RunOptions& run_options,
     // execute the graph
     ORT_CHECK_AND_SET_RETVAL(utils::ExecuteGraph(*session_state_, feeds_fetches_manager, feeds, *p_fetches,
                                                  session_options_.execution_mode, run_options.terminate, run_logger,
-                                                 run_options.only_execute_path_to_fetches));
+                                                 run_options.only_execute_path_to_fetches, partial_graph_run, run_id));
   }
   ORT_CATCH(const std::exception& e) {
     ORT_HANDLE_EXCEPTION([&]() {
@@ -1710,6 +1720,11 @@ common::Status InferenceSession::Run(const RunOptions& run_options, IOBinding& i
   // io_binding.SynchronizeInputs();
   return Run(run_options, io_binding.GetInputNames(), io_binding.GetInputs(), io_binding.GetOutputNames(),
              &io_binding.GetOutputs(), &io_binding.GetOutputsDeviceInfo());
+}
+
+common::Status InferenceSession::PartialRun(const RunOptions& run_options, IOBinding& io_binding, int64_t& run_id) {
+  return RunCore(run_options, io_binding.GetInputNames(), io_binding.GetInputs(), io_binding.GetOutputNames(),
+             &io_binding.GetOutputs(), &io_binding.GetOutputsDeviceInfo(), true, run_id);
 }
 
 common::Status InferenceSession::Run(IOBinding& io_binding) {

@@ -31,7 +31,7 @@ class IExecutionFrame {
   // initialized until the derived class is constructed.
   IExecutionFrame(const OrtValueNameIdxMap& ort_value_idx_map,
                   const NodeIndexInfo& node_index_info,
-                  const std::vector<int>& fetch_mlvalue_idxs);
+                  std::vector<int>& fetch_mlvalue_idxs);
 
   void Init(const std::vector<int>& feed_mlvalue_idxs, const std::vector<OrtValue>& feeds,
             const std::unordered_map<int, OrtValue>& initializers,
@@ -39,6 +39,11 @@ class IExecutionFrame {
 
  public:
   virtual ~IExecutionFrame();
+
+  void UpdateFeedAndFetches(const std::vector<int>& feed_mlvalue_idxs,
+                            const std::vector<OrtValue>& feeds,
+                            std::vector<int>& fetch_mlvalue_idxs,
+                            const std::vector<OrtValue>& fetches);
 
   // Get the index for the first entry of the given node.
   int GetNodeOffset(NodeIndex index) const {
@@ -81,7 +86,7 @@ class IExecutionFrame {
   virtual Status ReleaseMLValueImpl(int ort_value_idx);
 
   // returns true if the ort_value_idx is an output from the graph
-  bool IsOutput(int ort_value_idx) const;
+  bool IsOutput(int ort_value_idx);
 
  private:
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(IExecutionFrame);
@@ -104,10 +109,14 @@ class IExecutionFrame {
   // Input and Output values are passed in by executors
   std::vector<OrtValue> all_values_;
 
+  // Indicates if ORT owns intermediate values. Ownership can be transfered to the user in the event of
+  // partial graph execution.
+  std::vector<bool> all_values_ort_ownership_;
+
   // perf optimization to avoid calling all_values_.size() repeatedly as the size is fixed once constructed
   const size_t all_values_size_;
 
-  const std::vector<int> fetch_mlvalue_idxs_;
+  std::vector<int> fetch_mlvalue_idxs_;
 };
 
 class ExecutionFrame final : public IExecutionFrame {
@@ -116,7 +125,7 @@ class ExecutionFrame final : public IExecutionFrame {
                  const std::vector<int>& fetch_mlvalue_idxs, const std::vector<OrtValue>& fetches,
                  // optional custom allocators. key is index in fetches
                  const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
-                 const SessionState& session_state);
+                 const SessionState& session_state, bool partial_graph_run);
 
   ~ExecutionFrame() override;
 
@@ -161,6 +170,9 @@ class ExecutionFrame final : public IExecutionFrame {
     //   std::unique_lock<std::mutex> lock(mtx_);
     return static_activation_memory_sizes_in_byte_;
   }
+
+  bool partial_graph_run_;
+  size_t program_counter_;
 
  private:
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(ExecutionFrame);

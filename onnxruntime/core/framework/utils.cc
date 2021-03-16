@@ -210,6 +210,7 @@ static common::Status CalculateStaticCopyInfoForFeed(const SessionState& session
                                                      const std::string& input_name,
                                                      MLValueCopyInfo& copy_info) {
   std::vector<SessionState::NodeInfo> node_info_vec;
+  // REVIEW(codemzs): Need to modify this for partial graph execution such that we compare against the tensor that is being replaced.
   ORT_RETURN_IF_ERROR(session_state.GetInputNodeInfo(input_name, node_info_vec));
   const auto& node_info = node_info_vec.front();  // all consumers of a feed have the same device so first entry is fine
 
@@ -429,13 +430,40 @@ static common::Status CopyOutputsAcrossDevices(const SessionState& session_state
   return Status::OK();
 }
 
+static void CreateExecutionFrame(const std::vector<int>& feed_mlvalue_idxs, const std::vector<OrtValue>& feeds,
+                                 const std::vector<int>& fetch_mlvalue_idxs, const std::vector<OrtValue>& fetches,
+                                 const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
+                                 const SessionState& session_state, std::unique_ptr<ExecutionFrame>& p_frame,
+                                 bool partial_graph_run, int64_t& run_id) {
+  if (run_id == -1) {
+    p_frame = onnxruntime::make_unique<ExecutionFrame>(feed_mlvalue_idxs, feeds, fetch_mlvalue_idxs, fetches,
+                                                       fetch_allocators, session_state, partial_graph_run);
+
+    std::lock_guard<OrtMutex> lock(session_state.graph_runs_lock_);
+    session_state.graph_runs_.insert(std::make_pair(session_state.graph_runs_counter_, std::move(p_frame)));
+    run_id = session_state.graph_runs_counter_;
+    // REVIEW(mzs): May be reuse counters and prevent a potential overflow?
+    session_state.graph_runs_counter_ += 1;
+  } else {
+    auto it = session_state.graph_runs_.find(run_id);
+
+    ORT_ENFORCE(it != session_state.graph_runs_.end());
+
+    (it->second)->UpdateFeedAndFetches(feed_mlvalue_idxs, feeds, const_cast<std::vector<int>&>(fetch_mlvalue_idxs), fetches);
+  }
+
+  return;
+}
+
 static common::Status ExecuteGraphImpl(const SessionState& session_state,
                                        const FeedsFetchesManager& feeds_fetches_manager,
                                        const std::vector<OrtValue>& feeds, std::vector<OrtValue>& fetches,
                                        const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
                                        ExecutionMode execution_mode, const bool& terminate_flag,
-                                       const logging::Logger& logger, const bool only_execute_path_to_fetches = false) {
+                                       const logging::Logger& logger, const bool only_execute_path_to_fetches = false,
+                                       bool partial_graph_run = false, int64_t& run_id = AVAL) {
   std::unique_ptr<IExecutor> p_exec;
+  std::unique_ptr<ExecutionFrame> p_frame;
   if (execution_mode == ExecutionMode::ORT_SEQUENTIAL) {
     p_exec = std::unique_ptr<IExecutor>(new SequentialExecutor(terminate_flag, only_execute_path_to_fetches));
   } else if (execution_mode == ExecutionMode::ORT_PARALLEL) {
@@ -453,11 +481,14 @@ static common::Status ExecuteGraphImpl(const SessionState& session_state,
 
   // see if we can skip copies due to the types of execution providers available
   if (device_copy_checks.status == DeviceCopyCheck::NoCopy) {
+    CreateExecutionFrame(feeds_fetches_info.feeds_mlvalue_idxs, feeds, feeds_fetches_info.fetches_mlvalue_idxs,
+                         fetches, fetch_allocators, session_state, p_frame, partial_graph_run, run_id);
+
     // no device copies are needed so simple execute
     ORT_RETURN_IF_ERROR(p_exec->Execute(session_state,
                                         feeds_fetches_info.feeds_mlvalue_idxs, feeds,
                                         feeds_fetches_info.fetches_mlvalue_idxs, fetches, fetch_allocators,
-                                        logger));
+                                        logger, run_id));
   } else {
     const std::vector<OrtValue>* p_feeds = &feeds;
     std::vector<OrtValue>* p_fetches = &fetches;
@@ -489,14 +520,27 @@ static common::Status ExecuteGraphImpl(const SessionState& session_state,
       p_fetches = &device_fetches;
     }
 
+    CreateExecutionFrame(feeds_fetches_info.feeds_mlvalue_idxs, *p_feeds, feeds_fetches_info.fetches_mlvalue_idxs,
+                         *p_fetches, fetch_allocators, session_state, p_frame, partial_graph_run, run_id);
+
     ORT_RETURN_IF_ERROR(p_exec->Execute(session_state,
                                         feeds_fetches_info.feeds_mlvalue_idxs, *p_feeds,
                                         feeds_fetches_info.fetches_mlvalue_idxs, *p_fetches, fetch_allocators,
-                                        logger));
+                                        logger, run_id));
 
     if (device_copy_checks.output_copy_needed == DeviceCopyCheck::Copy) {
       ORT_RETURN_IF_ERROR(CopyOutputsAcrossDevices(session_state, *p_fetches, fetches, fetch_copy_info));
     }
+  }
+
+    auto it = session_state.graph_runs_.find(run_id);
+
+    ORT_ENFORCE(it != session_state.graph_runs_.end());
+
+  // REVIEW(codemzs): This won't work for parallel executor but we will remove it.
+  if (it->second->program_counter_ == (*session_state.GetExecutionPlan()).execution_plan.size()) {
+    std::lock_guard<OrtMutex> lock(session_state.graph_runs_lock_);
+    session_state.graph_runs_.erase(it);
   }
 
   return Status::OK();
@@ -506,14 +550,15 @@ common::Status ExecuteGraph(const SessionState& session_state,
                             FeedsFetchesManager& feeds_fetches_manager,
                             const std::vector<OrtValue>& feeds, std::vector<OrtValue>& fetches,
                             ExecutionMode execution_mode, const bool& terminate_flag,
-                            const logging::Logger& logger, bool only_execute_path_to_fetches) {
+                            const logging::Logger& logger, bool only_execute_path_to_fetches,
+                            bool partial_graph_run, int64_t& run_id) {
   ORT_RETURN_IF_ERROR(utils::InitializeFeedFetchCopyInfo(session_state, feeds_fetches_manager));
 
   // finalize the copy info using the provided feeds and fetches. will update device_copy_checks in the background
   FinalizeFeedFetchCopyInfo(feeds_fetches_manager, feeds, fetches);
 
   auto status = ExecuteGraphImpl(session_state, feeds_fetches_manager, feeds, fetches, {},
-                                 execution_mode, terminate_flag, logger, only_execute_path_to_fetches);
+                                 execution_mode, terminate_flag, logger, only_execute_path_to_fetches, partial_graph_run, run_id);
 
   return status;
 }
