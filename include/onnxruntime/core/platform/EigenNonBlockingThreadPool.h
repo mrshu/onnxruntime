@@ -229,6 +229,13 @@ class ThreadPoolParallelSection {
   std::atomic<unsigned> tasks_finished{0};
   PaddingToAvoidFalseSharing padding_2;
 
+  struct Done {
+    bool done_ = false;
+    PaddingToAvoidFalseSharing padding_;
+  };
+
+  std::vector<Done> dones;
+
   // If non-null, the current loop that tasks should be executing.  We
   // need to be careful on access to the contents of current_loop
   // because it can be stack allocated on the thread entering the
@@ -804,9 +811,9 @@ void EndParallelSectionInternal(PerThread &pt,
 
   // Attempt to revoke any tasks that were sent to workers but not
   // started.
+  /*
   unsigned tasks_started = static_cast<unsigned>(ps.tasks.size());
   unsigned tasks_revoked = 0;
-  /*
   while (!ps.tasks.empty()) {
     const auto& item = ps.tasks.back();
     Queue& q = worker_data_[item.first].queue;
@@ -817,6 +824,7 @@ void EndParallelSectionInternal(PerThread &pt,
   }*/
 
   // Wait for workers to exit ParLoopWorker
+  /*
   auto tasks_to_wait_for = tasks_started - tasks_revoked;
   while (ps.tasks_finished < tasks_to_wait_for) {
     onnxruntime::concurrency::SpinPause();
@@ -825,6 +833,12 @@ void EndParallelSectionInternal(PerThread &pt,
   // Clear status to allow the ThreadPoolParallelSection to be
   // re-used.
   ps.tasks_finished = 0;
+  */
+  for (size_t ii = 0; ii < ps.dones.size(); ++ii) {
+    while (!ps.dones[ii].done_) {
+      onnxruntime::concurrency::SpinPause();
+    }
+  }
 }
 
 void EndParallelSection(ThreadPoolParallelSection &ps) override {
@@ -864,13 +878,14 @@ void SummonWorkers(PerThread &pt,
   // value.  However, the costs of creating distinct lambda for each
   // iteration appeared more costly than the cost of synchronization
   // on a shared counter.
+  /*
   auto call_worker_fn = [&ps, worker_fn]() {
     unsigned my_idx = ++ps.worker_idx;
     worker_fn(my_idx);
     // After the assignment to ps.tasks_finished, the stack-allocated
     // ThreadPoolParallelSection object may be destroyed.
     ps.tasks_finished++;
-  };
+  };*/
 
   // Identify whether we need to create additional workers.
   // Throughout the threadpool implementation, degrees of parallelism
@@ -879,11 +894,17 @@ void SummonWorkers(PerThread &pt,
   unsigned current_dop = static_cast<unsigned>(ps.tasks.size()) + 1;
   if (n > current_dop) {
     unsigned extra_needed = n - current_dop;
+    ps.dones.assign(extra_needed, {});
     for (auto i = 0u; i < extra_needed; i++) {
       WorkerData& td = worker_data_[i];
       Queue& q = td.queue;
       unsigned w_idx;
-      Task t = q.PushBackWithTag(call_worker_fn, pt.tag, w_idx);
+      Task t = q.PushBackWithTag(
+          [&ps, worker_fn, i]() {
+            worker_fn(i + 1);
+            ps.dones[i].done_ = true;
+          },
+          pt.tag, w_idx);
       if (!t) {
         ps.tasks.push_back({i, w_idx});
         td.EnsureAwake();
