@@ -435,6 +435,7 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
     VLOGS(logger, 1) << "Releasing node ML values.";
     ORT_RETURN_IF_ERROR(ReleaseNodeMLValues(frame, seq_exec_plan, node_exec_plan, logger));
     if (frame.partial_graph_run_ && p_op_kernel->KernelDef().OpName() == "YieldOp") {
+      frame.program_counter_ += 1;
       break;
     }
   }
