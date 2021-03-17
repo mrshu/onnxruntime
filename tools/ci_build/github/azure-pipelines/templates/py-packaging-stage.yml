@@ -121,7 +121,7 @@ stages:
               -e NIGHTLY_BUILD \
               -e BUILD_BUILDNUMBER \
               onnxruntimecpubuild \
-                bash /onnxruntime/tools/doc/builddoc.sh $(PythonManylinuxDir)/bin/ $(Build.SourcesDirectory) $(Build.BinariesDirectory)
+                bash /onnxruntime/tools/doc/builddoc.sh $(PythonManylinuxDir)/bin/ $(Build.SourcesDirectory) $(Build.BinariesDirectory) Release
           workingDirectory: $(Build.SourcesDirectory)
 
       - task: CopyFiles@2
@@ -144,11 +144,11 @@ stages:
 
 
   - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-    - job: Linux_py_GPU_Wheels
-      timeoutInMinutes: 120
+    - job: Linux_py_Wheels_openmp
+      timeoutInMinutes: 90
       workspace:
         clean: all
-      pool: Onnxruntime-Linux-GPU
+      pool: Linux-CPU
       strategy:
         matrix:
           Python36:
@@ -168,10 +168,10 @@ stages:
 
       - template: get-docker-image-steps.yml
         parameters:
-          Dockerfile: tools/ci_build/github/linux/docker/Dockerfile.manylinux2014_cuda11
+          Dockerfile: tools/ci_build/github/linux/docker/Dockerfile.manylinux2014_cpu
           Context: tools/ci_build/github/linux/docker
           DockerBuildArgs: "--build-arg BUILD_UID=$( id -u )"
-          Repository: onnxruntimecuda11build
+          Repository: onnxruntimecpubuild
 
       - task: CmdLine@2
         inputs:

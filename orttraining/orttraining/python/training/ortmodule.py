@@ -11,6 +11,7 @@ import onnxruntime
 import torch
 import inspect
 from inspect import signature
+from enum import IntEnum
 
 from torch.utils.dlpack import from_dlpack, to_dlpack
 from torch.utils.cpp_extension import load_inline
@@ -33,6 +34,12 @@ def _ortvalue_to_dlpack(ortvalue):
 
 def _ortvalue_from_dlpack(dlpack_tensor):
     return OrtValue(C.OrtValue.from_dlpack(dlpack_tensor))
+class Verbosity(IntEnum):
+    VERBOSE = 0
+    INFO = 1
+    WARNING = 2
+    ERROR = 3
+    FATAL = 4
 
 def _create_iobinding(io_binding, inputs, model, device):
     '''Creates IO binding for a `model` inputs and output'''
@@ -65,7 +72,7 @@ def _ort_output_to_torch_tensor(ort_output):
     tensor = from_dlpack(_ortvalue_to_dlpack(ort_output))
     return tensor.to(torch.bool) if tensor.dtype == torch.uint8 else tensor
 
-def _load_torch_allocator_cpp_extension():
+def _load_torch_allocator_cpp_extension(verbosity):
     torch_cuda_allocator_addresses_cpp_source = """
     #include <torch/extension.h>
     #include <c10/cuda/CUDACachingAllocator.h>
@@ -79,7 +86,7 @@ def _load_torch_allocator_cpp_extension():
 
     return load_inline(name='inline_extension', cpp_sources=[torch_cuda_allocator_addresses_cpp_source],
                         functions=['cuda_caching_allocator_raw_alloc_address', 'cuda_caching_allocator_raw_delete_address'],
-                        verbose=True, with_cuda=True)
+                        verbose=verbosity < Verbosity.WARNING, with_cuda=True)
 
 class ORTModule(torch.nn.Module):
 
@@ -226,6 +233,9 @@ class ORTModule(torch.nn.Module):
 
         super(ORTModule, self).__init__()
 
+        # Verbosity for logging
+        self._verbosity = Verbosity.WARNING
+
         # Support contrib OPs
         register_custom_ops_pytorch_exporter.register_custom_op()
 
@@ -276,14 +286,14 @@ class ORTModule(torch.nn.Module):
         # Disable external allocator for ROCM EP since external allocator is not supported yet.
         self._use_external_cuda_allocator = (False if self.is_rocm_pytorch else True)
         if self._use_external_cuda_allocator:
-            self._torch_cuda_allocator = _load_torch_allocator_cpp_extension()
+            self._torch_cuda_allocator = _load_torch_allocator_cpp_extension(self._verbosity)
             self._torch_alloc = self._torch_cuda_allocator.cuda_caching_allocator_raw_alloc_address()
             self._torch_free = self._torch_cuda_allocator.cuda_caching_allocator_raw_delete_address()
 
     def _initialize_module_gradient_graph_builder(self):
         # TODO: PyTorch exporter bug: changes the initializer order in ONNX model
         initializer_names = [p[0] for p in self._flattened_output_module.named_parameters()]
-        onnx_initializer_names = [p.name for p in self._onnx_inference.graph.initializer]
+        onnx_initializer_names = {p.name for p in self._onnx_inference.graph.initializer}
         initializer_names = [p for p in initializer_names if p in onnx_initializer_names]
 
         # Build full training graph
@@ -322,7 +332,7 @@ class ORTModule(torch.nn.Module):
         # default to PRIORITY_BASED execution order
         session_options.execution_order = onnxruntime.ExecutionOrder.PRIORITY_BASED
         # 0:Verbose, 1:Info, 2:Warning. 3:Error, 4:Fatal. Default is 2.
-        session_options.log_severity_level = 2
+        session_options.log_severity_level = int(self._verbosity)
 
         self._training_session = onnxruntime.training.TrainingAgent(self._onnx_training.SerializeToString(),
                                                                     session_options, providers, provider_options)
@@ -417,7 +427,8 @@ class ORTModule(torch.nn.Module):
                                 opset_version=ONNX_OPSET_VERSION,
                                 do_constant_folding=False,
                                 training=torch.onnx.TrainingMode.TRAINING,
-                                dynamic_axes=dynamic_axes)
+                                dynamic_axes=dynamic_axes,
+                                verbose=self._verbosity < Verbosity.WARNING)
         except RuntimeError as e:
             raise RuntimeError('There was an error while exporting the PyTorch model to ONNX: {}'.format(e))
 
