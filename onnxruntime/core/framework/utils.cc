@@ -210,16 +210,25 @@ static common::Status CalculateStaticCopyInfoForFeed(const SessionState& session
                                                      const std::string& input_name,
                                                      MLValueCopyInfo& copy_info) {
   std::vector<SessionState::NodeInfo> node_info_vec;
-  // REVIEW(codemzs): Need to modify this for partial graph execution such that we compare against the tensor that is being replaced.
-  ORT_RETURN_IF_ERROR(session_state.GetInputNodeInfo(input_name, node_info_vec));
-  const auto& node_info = node_info_vec.front();  // all consumers of a feed have the same device so first entry is fine
+  if (session_state.GetInputNodeInfo(input_name, node_info_vec) == Status::OK()) {
+    const auto& node_info = node_info_vec.front();  // all consumers of a feed have the same device so first entry is fine
 
-  if (node_info.p_node == nullptr) {
-    // ignore dummy entry for an input that we didn't find a use of in the graph.
-    return Status::OK();
+    if (node_info.p_node == nullptr) {
+      // ignore dummy entry for an input that we didn't find a use of in the graph.
+      return Status::OK();
+    }
+
+    copy_info.target_device = *node_info.device;
+  
+  } else {
+    // This input might be for an intermediate tensor for partial graph execution.
+    const auto* exec_plan = session_state.GetExecutionPlan();
+    const auto& name_to_id = session_state.GetOrtValueNameIdxMap();
+    int index;
+    ORT_RETURN_IF_ERROR(name_to_id.GetIdx(input_name, index));
+    const auto& device = exec_plan->GetLocation(index).device;
+    copy_info.target_device = device;
   }
-
-  copy_info.target_device = *node_info.device;
 
   return Status::OK();
 }
@@ -533,9 +542,9 @@ static common::Status ExecuteGraphImpl(const SessionState& session_state,
     }
   }
 
-    auto it = session_state.graph_runs_.find(run_id);
+  auto it = session_state.graph_runs_.find(run_id);
 
-    ORT_ENFORCE(it != session_state.graph_runs_.end());
+  ORT_ENFORCE(it != session_state.graph_runs_.end());
 
   // REVIEW(codemzs): This won't work for parallel executor but we will remove it.
   if (it->second->program_counter_ == (*session_state.GetExecutionPlan()).execution_plan.size()) {

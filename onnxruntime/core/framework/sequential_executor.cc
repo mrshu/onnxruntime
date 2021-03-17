@@ -431,13 +431,13 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
     utils::DumpNodeOutputs(op_kernel_context, p_op_kernel->Node(), session_state);
 #endif
 
-    // free ml-values corresponding to this node
-    VLOGS(logger, 1) << "Releasing node ML values.";
-    ORT_RETURN_IF_ERROR(ReleaseNodeMLValues(frame, seq_exec_plan, node_exec_plan, logger));
     if (frame.partial_graph_run_ && p_op_kernel->KernelDef().OpName() == "YieldOp") {
       frame.program_counter_ += 1;
       break;
     }
+    // free ml-values corresponding to this node
+    VLOGS(logger, 1) << "Releasing node ML values.";
+    ORT_RETURN_IF_ERROR(ReleaseNodeMLValues(frame, seq_exec_plan, node_exec_plan, logger));
   }
 
 #ifdef ENABLE_NVTX_PROFILE
@@ -459,7 +459,7 @@ Status SequentialExecutor::Execute(const SessionState& session_state, const std:
 
   VLOGS(logger, 1) << "Fetching output.";
   // ExecutionFrame::Finalize will update 'fetches' with the final output
-  ORT_RETURN_IF_ERROR(frame.GetOutputs(fetches));
+  ORT_RETURN_IF_ERROR(frame.GetOutputs(fetches, (frame.program_counter_ < exec_plan_vec.size()) && frame.partial_graph_run_));
   VLOGS(logger, 1) << "Done with execution.";
 
 #if !defined(ORT_MINIMAL_BUILD) && defined(ORT_MEMORY_PROFILE)

@@ -4,6 +4,7 @@ import logging
 import onnx
 import onnxruntime
 import torch
+import numpy as np
 from inspect import signature
 
 from torch.utils.dlpack import from_dlpack
@@ -202,8 +203,8 @@ class ORTModule(torch.nn.Module):
 
                     # Run and get results
                     run_id = ctx.run_id
-                     _create_backward_iobinding(self._training_backward_io_binding, backward_grad_output_ortvalue, self._onnx_training, self._device, self._onnx_graphs_info.user_output_names)
-                    self._training_session.run_backward(self._training_backward_io_binding, self._run_options, run_id)
+                    _create_backward_iobinding(self._training_backward_io_binding, contiguous_grad_outputs, self._onnx_training, self._device, self._onnx_graphs_info.user_output_names)
+                    self._training_session.run_backward(self._training_backward_io_binding, self._run_options, np.int64(run_id))
                     backward_outputs = self._training_backward_io_binding.get_outputs()
 
                     # Return input and initializer gradients

@@ -71,7 +71,7 @@ class IExecutionFrame {
    * write the output values to the 'fetches' vector
    * Don't access the values after SessionState is destroyed 
    */
-  Status GetOutputs(std::vector<OrtValue>& fetches);
+  Status GetOutputs(std::vector<OrtValue>& fetches, bool release = false);
 
   AllocatorPtr GetAllocator(const OrtMemoryInfo& info) const;
 
@@ -96,6 +96,12 @@ class IExecutionFrame {
     return all_values_[ort_value_index];
   }
 
+  void GetMLValue(int ort_value_index, OrtValue& fetch) {
+    ORT_ENFORCE(ort_value_index >= 0 && static_cast<size_t>(ort_value_index) < all_values_size_);
+    fetch = all_values_[ort_value_index];
+    all_values_[ort_value_index] = OrtValue();
+  }
+
   virtual AllocatorPtr GetAllocatorImpl(const OrtMemoryInfo& info) const = 0;
 
   virtual Status CreateNodeOutputMLValueImpl(OrtValue& ort_value, int ort_value_idx, const TensorShape* shape,
@@ -108,10 +114,6 @@ class IExecutionFrame {
   // All the intermediate values for the entire graph.
   // Input and Output values are passed in by executors
   std::vector<OrtValue> all_values_;
-
-  // Indicates if ORT owns intermediate values. Ownership can be transfered to the user in the event of
-  // partial graph execution.
-  std::vector<bool> all_values_ort_ownership_;
 
   // perf optimization to avoid calling all_values_.size() repeatedly as the size is fixed once constructed
   const size_t all_values_size_;

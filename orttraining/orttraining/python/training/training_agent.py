@@ -65,7 +65,7 @@ class TrainingAgent(object):
         run_id = self._training_agent.run_forward(iobinding._iobinding, run_options)
         return run_id
 
-    def run_backward(self, iobinding, run_options):
+    def run_backward(self, iobinding, run_options, run_id):
         """
          Resume executing the backward subgraph starting from Yield Op.
          :param backward_output_grads: Output gradients for backward.
